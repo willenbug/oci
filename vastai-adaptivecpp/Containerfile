@@ -1,0 +1,110 @@
+# AdaptiveCpp development environment for Vast.ai
+# Ubuntu 24.04 + CUDA 13.0.2 + LLVM 20 + AdaptiveCpp
+
+FROM docker.io/vastai/base-image:cuda-13.0.2-cudnn-devel-ubuntu24.04-py313
+
+LABEL maintainer="willenborg"
+LABEL description="AdaptiveCpp development environment with LLVM toolchain on Vast.ai"
+
+# Versions
+ARG LLVM_VERSION=20
+ARG NINJA_VERSION=1.13.2
+ARG MISE_VERSION=2025.12.10
+ARG ACPP_VERSION=v25.10.0
+
+ARG ACPP_INSTALL_PREFIX=/opt/adaptivecpp
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Base prerequisites
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget gnupg software-properties-common ca-certificates git pkg-config unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# CMake (Kitware APT repository)
+RUN wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null \
+    && echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ noble main' | tee /etc/apt/sources.list.d/kitware.list >/dev/null \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends kitware-archive-keyring cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ninja (GitHub releases)
+RUN ARCH=$(uname -m) \
+    && if [ "$ARCH" = "x86_64" ]; then NINJA_ARCHIVE="ninja-linux.zip"; \
+       elif [ "$ARCH" = "aarch64" ]; then NINJA_ARCHIVE="ninja-linux-aarch64.zip"; \
+       else echo "Unsupported architecture: $ARCH"; exit 1; fi \
+    && wget -q "https://github.com/ninja-build/ninja/releases/download/v${NINJA_VERSION}/${NINJA_ARCHIVE}" -O /tmp/ninja.zip \
+    && unzip /tmp/ninja.zip -d /usr/local/bin \
+    && chmod +x /usr/local/bin/ninja \
+    && rm /tmp/ninja.zip
+
+# mise (GitHub releases)
+RUN ARCH=$(uname -m) \
+    && if [ "$ARCH" = "x86_64" ]; then MISE_ARCH="x64"; \
+       elif [ "$ARCH" = "aarch64" ]; then MISE_ARCH="arm64"; \
+       else echo "Unsupported architecture: $ARCH"; exit 1; fi \
+    && wget -q "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/mise-v${MISE_VERSION}-linux-${MISE_ARCH}.tar.gz" -O /tmp/mise.tar.gz \
+    && tar -xzf /tmp/mise.tar.gz -C /tmp \
+    && mv /tmp/mise/bin/mise /usr/local/bin/mise \
+    && chmod +x /usr/local/bin/mise \
+    && rm -rf /tmp/mise.tar.gz /tmp/mise
+
+ENV MISE_DATA_DIR="/root/.local/share/mise"
+ENV PATH="${MISE_DATA_DIR}/shims:${PATH}"
+RUN mise settings set experimental true \
+    && mise settings set trusted_config_paths /workspace
+
+# LLVM/Clang (official LLVM repository)
+RUN wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc \
+    && echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.list \
+    && echo "deb-src http://apt.llvm.org/noble/ llvm-toolchain-noble-${LLVM_VERSION} main" >> /etc/apt/sources.list.d/llvm.list
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang-${LLVM_VERSION} clangd-${LLVM_VERSION} clang-tidy-${LLVM_VERSION} clang-format-${LLVM_VERSION} \
+    clang-tools-${LLVM_VERSION} libclang-${LLVM_VERSION}-dev libclang-common-${LLVM_VERSION}-dev libclang1-${LLVM_VERSION} \
+    llvm-${LLVM_VERSION} llvm-${LLVM_VERSION}-dev lld-${LLVM_VERSION} \
+    libc++-${LLVM_VERSION}-dev libc++abi-${LLVM_VERSION}-dev libomp-${LLVM_VERSION}-dev libpolly-${LLVM_VERSION}-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN update-alternatives --install /usr/bin/clang clang /usr/bin/clang-${LLVM_VERSION} 100 \
+    && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-${LLVM_VERSION} 100 \
+    && update-alternatives --install /usr/bin/clangd clangd /usr/bin/clangd-${LLVM_VERSION} 100 \
+    && update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-${LLVM_VERSION} 100 \
+    && update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-${LLVM_VERSION} 100 \
+    && update-alternatives --install /usr/bin/lld lld /usr/bin/lld-${LLVM_VERSION} 100 \
+    && update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-${LLVM_VERSION} 100 \
+    && update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-${LLVM_VERSION} 100
+
+ENV CC=clang
+ENV CXX=clang++
+
+# AdaptiveCpp
+RUN git clone --depth 1 --branch ${ACPP_VERSION} https://github.com/AdaptiveCpp/AdaptiveCpp.git /tmp/AdaptiveCpp \
+    && mkdir -p /tmp/AdaptiveCpp/build \
+    && cd /tmp/AdaptiveCpp/build \
+    && cmake -G Ninja \
+        -DCMAKE_INSTALL_PREFIX=${ACPP_INSTALL_PREFIX} \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER=clang-${LLVM_VERSION} \
+        -DCMAKE_CXX_COMPILER=clang++-${LLVM_VERSION} \
+        -DLLVM_DIR=/usr/lib/llvm-${LLVM_VERSION}/cmake \
+        -DACPP_COMPILER_FEATURE_PROFILE=full \
+        -DWITH_CUDA_BACKEND=ON \
+        -DWITH_ROCM_BACKEND=OFF \
+        -DWITH_OPENCL_BACKEND=OFF \
+        -DWITH_LEVEL_ZERO_BACKEND=OFF \
+        .. \
+    && ninja \
+    && ninja install \
+    && rm -rf /tmp/AdaptiveCpp
+
+ENV PATH="${ACPP_INSTALL_PREFIX}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${ACPP_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH}"
+
+# Verify installations
+RUN cmake --version && ninja --version && mise --version \
+    && clang --version && clangd --version && clang-tidy --version && clang-format --version \
+    && (nvcc --version || true) && (acpp --version || true)
+
+ENV DEBIAN_FRONTEND=
+WORKDIR /workspace
